@@ -1,0 +1,54 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: weather-service
+  namespace: maxweather
+  labels:
+    app: weather-service
+spec:
+  scaleTargetRef:
+    name: weather-service
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 300
+  triggers:
+    # ── Reactive: CPU-based fallback ──────────────────────────────────────────
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+
+    # ── Scheduled: Weekday morning peak (06:30–09:30 WIB Mon-Fri) ────────────
+    # Pre-warms to 12 pods before the 07:00 WIB rush. HPA takes over at 09:30.
+    - type: cron
+      metadata:
+        timezone: Asia/Jakarta
+        start: "30 6 * * 1-5"    # 06:30 WIB Mon-Fri — scale up
+        end:   "30 9 * * 1-5"    # 09:30 WIB Mon-Fri — hand off to HPA
+        desiredReplicas: "12"
+
+    # ── Scheduled: Weekend morning peak (07:30–10:30 WIB Sat-Sun) ────────────
+    # Weekend traffic ~40% lower than weekday peak.
+    - type: cron
+      metadata:
+        timezone: Asia/Jakarta
+        start: "30 7 * * 6,0"    # 07:30 WIB Sat-Sun — scale up
+        end:   "30 10 * * 6,0"   # 10:30 WIB Sat-Sun — hand off to HPA
+        desiredReplicas: "7"
+
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120

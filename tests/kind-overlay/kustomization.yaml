@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../k8s/base
+
+patches:
+  - path: deployment-patch.yaml
+  - path: ingress-patch.yaml
+
+configMapGenerator:
+  - name: weather-service-config
+    namespace: maxweather
+    literals:
+      - APP_ENV=kind-test
+      - VALKEY_HOST=localhost
+      - VALKEY_PORT=6379
+      - VALKEY_TTL=600
+      - DB_HOST=localhost
+      - DB_PORT=5432
+      - DB_NAME=maxweather
+
+secretGenerator:
+  - name: weather-service-secrets
+    namespace: maxweather
+    literals:
+      - OPENWEATHERMAP_API_KEY=kind-test-fake-key
+      - DB_USER=testuser
+      - DB_PASSWORD=testpassword

@@ -1,0 +1,192 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION      = 'ap-southeast-1'
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        IMAGE_REPO      = 'maxweather'
+        SERVICE_NAME    = 'weather-service'
+        K8S_NAMESPACE   = 'maxweather'
+    }
+
+    parameters {
+        string(name: 'DEPLOY_ENV', defaultValue: 'staging', description: 'Target environment: staging | production')
+        string(name: 'IMAGE_TAG',  defaultValue: '', description: 'Image tag to deploy (leave blank to build from HEAD)')
+    }
+
+    options {
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHA       = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+                    env.GIT_BRANCH    = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    env.BUILD_TAG     = params.IMAGE_TAG ?: "${env.GIT_BRANCH}-${env.GIT_SHA}-${env.BUILD_NUMBER}"
+                    env.DEPLOY_ENV    = params.DEPLOY_ENV
+                    env.ECR_IMAGE     = "${ECR_REGISTRY}/${IMAGE_REPO}-${env.DEPLOY_ENV}/${SERVICE_NAME}"
+                    env.EKS_CLUSTER   = "maxweather-${env.DEPLOY_ENV}"
+                }
+                echo "Branch: ${env.GIT_BRANCH} | SHA: ${env.GIT_SHA} | Tag: ${env.BUILD_TAG} | Env: ${env.DEPLOY_ENV}"
+            }
+        }
+
+        stage('Test') {
+            when { expression { !params.IMAGE_TAG } }
+            steps {
+                dir('app') {
+                    sh '''
+                        python -m venv .venv
+                        . .venv/bin/activate
+                        pip install --quiet -r requirements.txt
+                        pip install --quiet -r requirements-dev.txt
+                        python -m pytest tests/unit/ -v --tb=short --junitxml=test-results.xml
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'app/test-results.xml'
+                }
+            }
+        }
+
+        stage('Build & Push') {
+            when { expression { !params.IMAGE_TAG } }
+            steps {
+                script {
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
+
+                    def image = docker.build(
+                        "${env.ECR_IMAGE}:${env.BUILD_TAG}",
+                        "--no-cache --file app/Dockerfile app/"
+                    )
+                    image.push(env.BUILD_TAG)
+
+                    if (env.DEPLOY_ENV == 'production') {
+                        image.push("prod-${env.GIT_SHA}")
+                    }
+                    image.push('latest')
+                }
+            }
+        }
+
+        stage('Deploy Staging') {
+            when { expression { env.DEPLOY_ENV == 'staging' } }
+            steps {
+                script {
+                    _kubectlApply('staging', env.BUILD_TAG)
+                }
+            }
+        }
+
+        stage('Smoke Test — Staging') {
+            when { expression { env.DEPLOY_ENV == 'staging' } }
+            steps {
+                script {
+                    _waitForRollout('staging')
+                    _smokeTest('api-staging.maxweather.internal')
+                }
+            }
+        }
+
+        stage('Approval — Production') {
+            when { expression { env.DEPLOY_ENV == 'production' } }
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input message: "Deploy ${env.BUILD_TAG} to production?",
+                          ok: 'Deploy',
+                          submitter: 'ops-team'
+                }
+            }
+        }
+
+        stage('Deploy Production') {
+            when { expression { env.DEPLOY_ENV == 'production' } }
+            steps {
+                script {
+                    _kubectlApply('production', env.BUILD_TAG)
+                }
+            }
+        }
+
+        stage('Health Check — Production') {
+            when { expression { env.DEPLOY_ENV == 'production' } }
+            steps {
+                script {
+                    _waitForRollout('production')
+                    _smokeTest('api.maxweather.internal')
+                }
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo "Pipeline succeeded: ${env.DEPLOY_ENV} @ ${env.BUILD_TAG}"
+        }
+        failure {
+            script {
+                if (env.DEPLOY_ENV) {
+                    sh """
+                        aws eks update-kubeconfig --region ${AWS_REGION} --name maxweather-${env.DEPLOY_ENV}
+                        kubectl rollout undo deployment/${SERVICE_NAME} -n ${K8S_NAMESPACE} || true
+                    """
+                }
+            }
+            echo "Pipeline failed — rollback attempted for ${env.DEPLOY_ENV}"
+        }
+        always {
+            cleanWs()
+        }
+    }
+
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _kubectlApply(String environment, String imageTag) {
+    sh """
+        aws eks update-kubeconfig --region ${AWS_REGION} --name maxweather-${environment}
+
+        # Render the image tag into the overlay before applying
+        cd k8s/overlays/${environment}
+        kustomize edit set image \
+            ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/maxweather-${environment}/${SERVICE_NAME}:latest=\
+${ECR_REGISTRY}/${IMAGE_REPO}-${environment}/${SERVICE_NAME}:${imageTag}
+
+        kubectl apply -k k8s/overlays/${environment}
+    """
+}
+
+def _waitForRollout(String environment) {
+    sh """
+        aws eks update-kubeconfig --region ${AWS_REGION} --name maxweather-${environment}
+        kubectl rollout status deployment/${SERVICE_NAME} \
+            -n ${K8S_NAMESPACE} \
+            --timeout=300s
+    """
+}
+
+def _smokeTest(String host) {
+    sh """
+        # /health — must return 200
+        STATUS=\$(curl -sf -o /dev/null -w '%{http_code}' http://${host}/health)
+        [ "\$STATUS" = "200" ] || (echo "Health check failed: HTTP \$STATUS" && exit 1)
+
+        # /weather?city=Singapore — must return 200 with Bearer token
+        STATUS=\$(curl -sf -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer \${SMOKE_TEST_API_KEY}" \
+            "http://${host}/weather?city=Singapore&units=metric")
+        [ "\$STATUS" = "200" ] || (echo "Weather endpoint failed: HTTP \$STATUS" && exit 1)
+
+        echo "Smoke tests passed for ${host}"
+    """
+}

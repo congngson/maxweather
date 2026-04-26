@@ -1,0 +1,211 @@
+{
+  "info": {
+    "name": "MaxWeather API",
+    "_postman_id": "maxweather-collection-v1",
+    "description": "MaxWeather API collection — tests all endpoints with Bearer token (OAuth2) auth.\n\nSetup:\n1. Set collection variable `base_url` to your API Gateway URL\n2. Set collection variable `api_key` to a valid key from DynamoDB api-keys table\n3. Run requests in order — Health first, then authenticated endpoints",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://your-api-id.execute-api.ap-southeast-1.amazonaws.com",
+      "description": "API Gateway base URL (no trailing slash)"
+    },
+    {
+      "key": "api_key",
+      "value": "your-api-key-here",
+      "description": "Bearer token — must exist in DynamoDB maxweather-{env}-api-keys table with active=true"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Response has status field', () => {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body).to.have.property('status');",
+              "    pm.expect(body.status).to.eql('ok');",
+              "});",
+              "pm.test('Response time < 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Health check — no auth required. Verifies the service is running."
+      }
+    },
+    {
+      "name": "Get Current Weather — metric",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Response has data', () => {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body).to.have.property('data');",
+              "    const d = body.data;",
+              "    pm.expect(d).to.have.property('city');",
+              "    pm.expect(d).to.have.property('temperature');",
+              "    pm.expect(d).to.have.property('humidity');",
+              "    pm.expect(d).to.have.property('description');",
+              "});",
+              "pm.test('Cache header present', () => {",
+              "    pm.expect(pm.response.headers.get('X-Cache')).to.be.oneOf(['HIT', 'MISS', null]);",
+              "});",
+              "pm.test('Response time < 2000ms', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/weather?city=Singapore&units=metric",
+          "host": ["{{base_url}}"],
+          "path": ["weather"],
+          "query": [
+            { "key": "city",  "value": "Singapore" },
+            { "key": "units", "value": "metric" }
+          ]
+        },
+        "description": "Returns current weather for Singapore in metric units. Requires Bearer token."
+      }
+    },
+    {
+      "name": "Get Current Weather — imperial",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('City is Hanoi', () => {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.data.city.toLowerCase()).to.include('hanoi');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/weather?city=Hanoi&units=imperial",
+          "host": ["{{base_url}}"],
+          "path": ["weather"],
+          "query": [
+            { "key": "city",  "value": "Hanoi" },
+            { "key": "units", "value": "imperial" }
+          ]
+        },
+        "description": "Returns current weather for Hanoi in imperial units."
+      }
+    },
+    {
+      "name": "Get 7-day Forecast",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.test('Response has 7 forecast days', () => {",
+              "    const body = pm.response.json();",
+              "    pm.expect(body).to.have.property('data');",
+              "    pm.expect(body.data).to.have.property('forecasts');",
+              "    pm.expect(body.data.forecasts).to.have.lengthOf(7);",
+              "});",
+              "pm.test('Each day has required fields', () => {",
+              "    const forecasts = pm.response.json().data.forecasts;",
+              "    forecasts.forEach(day => {",
+              "        pm.expect(day).to.have.property('date');",
+              "        pm.expect(day).to.have.property('temp_min');",
+              "        pm.expect(day).to.have.property('temp_max');",
+              "        pm.expect(day).to.have.property('description');",
+              "    });",
+              "});",
+              "pm.test('Response time < 3000ms', () => pm.expect(pm.response.responseTime).to.be.below(3000));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/forecast?city=Singapore&days=7&units=metric",
+          "host": ["{{base_url}}"],
+          "path": ["forecast"],
+          "query": [
+            { "key": "city",  "value": "Singapore" },
+            { "key": "days",  "value": "7" },
+            { "key": "units", "value": "metric" }
+          ]
+        },
+        "description": "Returns 7-day forecast for Singapore in metric units."
+      }
+    },
+    {
+      "name": "Invalid API Key — expect 401",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 401 or 403', () => {",
+              "    pm.expect(pm.response.code).to.be.oneOf([401, 403]);",
+              "});",
+              "pm.test('Response time < 1000ms', () => pm.expect(pm.response.responseTime).to.be.below(1000));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [{ "key": "token", "value": "invalid-key-000", "type": "string" }]
+        },
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/weather?city=Singapore&units=metric",
+          "host": ["{{base_url}}"],
+          "path": ["weather"],
+          "query": [
+            { "key": "city",  "value": "Singapore" },
+            { "key": "units", "value": "metric" }
+          ]
+        },
+        "description": "Verifies that an invalid Bearer token is rejected by the Lambda Authorizer."
+      }
+    }
+  ]
+}

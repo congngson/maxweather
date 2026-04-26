@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-service
+  namespace: maxweather
+  labels:
+    app: weather-service
+    app.kubernetes.io/name: weather-service
+    app.kubernetes.io/part-of: maxweather
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: weather-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: weather-service
+        app.kubernetes.io/name: weather-service
+    spec:
+      serviceAccountName: weather-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: weather-service
+          image: ACCOUNT_ID.dkr.ecr.ap-southeast-1.amazonaws.com/maxweather-ENV/weather-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          env:
+            - name: APP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: APP_ENV
+            - name: VALKEY_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: VALKEY_HOST
+            - name: VALKEY_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: VALKEY_PORT
+            - name: VALKEY_TTL
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: VALKEY_TTL
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: weather-service-config
+                  key: DB_NAME
+            - name: OPENWEATHERMAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: weather-service-secrets
+                  key: OPENWEATHERMAP_API_KEY
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: weather-service-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: weather-service-secrets
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: weather-service

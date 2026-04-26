@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-service
+  namespace: maxweather
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: weather-service
+          image: ACCOUNT_ID.dkr.ecr.ap-southeast-1.amazonaws.com/maxweather-staging/weather-service:latest
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

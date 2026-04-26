@@ -1,40 +1,40 @@
 # ── ASG Scheduled Actions (Node-level pre-warm) ───────────────────────────────
-# All times in UTC. WIB = UTC+7.
+# All times in UTC. Local time = UTC+7 (Asia/Ho_Chi_Minh).
 # Architecture defines 5 schedule windows matching the scaling timeline:
 #
-#   06:00 WIB  Weekday pre-warm  → 23:00 UTC previous day (Mon-Fri)
-#   07:30 WIB  Weekend warm      → 00:30 UTC (Sat-Sun)
-#   10:30 WIB  Post-peak down    → 03:30 UTC (Mon-Fri and Sat-Sun)
-#   22:00 WIB  Night mode        → 15:00 UTC daily
+#   06:00 UTC+7  Weekday pre-warm  → 23:00 UTC previous day (Mon-Fri)
+#   07:30 UTC+7  Weekend warm      → 00:30 UTC (Sat-Sun)
+#   10:30 UTC+7  Post-peak down    → 03:30 UTC (Mon-Fri and Sat-Sun)
+#   22:00 UTC+7  Night mode        → 15:00 UTC daily
 
 locals {
   schedule_config = {
     weekday-prewarm = {
-      recurrence    = "0 23 * * 0-4"   # 06:00 WIB Mon-Fri (fires Sun-Thu UTC)
+      recurrence    = "0 23 * * 0-4"   # 06:00 UTC+7 Mon-Fri (fires Sun-Thu UTC)
       min_size      = var.schedule_weekday_peak.min_size
       max_size      = var.schedule_weekday_peak.max_size
       desired_count = var.schedule_weekday_peak.desired_count
     }
     weekday-postpeak = {
-      recurrence    = "30 3 * * 1-5"   # 10:30 WIB Mon-Fri
+      recurrence    = "30 3 * * 1-5"   # 10:30 UTC+7 Mon-Fri
       min_size      = var.schedule_weekday_offpeak.min_size
       max_size      = var.schedule_weekday_offpeak.max_size
       desired_count = var.schedule_weekday_offpeak.desired_count
     }
     weekend-warm = {
-      recurrence    = "30 0 * * 6,0"   # 07:30 WIB Sat-Sun
+      recurrence    = "30 0 * * 6,0"   # 07:30 UTC+7 Sat-Sun
       min_size      = var.schedule_weekend_peak.min_size
       max_size      = var.schedule_weekend_peak.max_size
       desired_count = var.schedule_weekend_peak.desired_count
     }
     weekend-postpeak = {
-      recurrence    = "30 3 * * 6,0"   # 10:30 WIB Sat-Sun
+      recurrence    = "30 3 * * 6,0"   # 10:30 UTC+7 Sat-Sun
       min_size      = var.schedule_weekend_offpeak.min_size
       max_size      = var.schedule_weekend_offpeak.max_size
       desired_count = var.schedule_weekend_offpeak.desired_count
     }
     night-mode = {
-      recurrence    = "0 15 * * *"     # 22:00 WIB daily
+      recurrence    = "0 15 * * *"     # 22:00 UTC+7 daily
       min_size      = var.schedule_night.min_size
       max_size      = var.schedule_night.max_size
       desired_count = var.schedule_night.desired_count

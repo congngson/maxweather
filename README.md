@@ -21,7 +21,7 @@
 
 ## Project Overview
 
-MaxWeather is a weather forecast platform deployed on AWS using Kubernetes (EKS) as the container orchestration platform. The system exposes weather forecast APIs protected by Bearer token auth via Lambda Authorizer, supports high availability across multiple Availability Zones, and auto-scales based on traffic — including scheduled pre-warming before the morning peak (7–9am WIB).
+MaxWeather is a weather forecast platform deployed on AWS using Kubernetes (EKS) as the container orchestration platform. The system exposes weather forecast APIs protected by Bearer token auth via Lambda Authorizer, supports high availability across multiple Availability Zones, and auto-scales based on traffic — including scheduled pre-warming before the morning peak (7–9am UTC+7).
 
 ---
 
@@ -31,7 +31,7 @@ Full architecture: [design/architecture.md](design/architecture.md) · Diagram: 
 
 ### Core Problem
 
-Weather data is fetched from a third-party API (OpenWeatherMap) on every request. At morning peak (7–9am WIB), concurrent requests spike sharply and predictably. Two problems must be solved simultaneously: **external API cost and latency** (solved by Valkey cache, TTL 10min) and **cold-start delay at peak** (solved by scheduled pre-warming, not reactive scaling alone).
+Weather data is fetched from a third-party API (OpenWeatherMap) on every request. At morning peak (7–9am UTC+7), concurrent requests spike sharply and predictably. Two problems must be solved simultaneously: **external API cost and latency** (solved by Valkey cache, TTL 10min) and **cold-start delay at peak** (solved by scheduled pre-warming, not reactive scaling alone).
 
 ### Key Design Decisions
 
@@ -42,7 +42,7 @@ API Gateway's native API key mechanism offers no per-key revocation granularity 
 In-process cache (e.g. Python dict) would not survive pod restarts and would be duplicated across all pod replicas — each replica would independently call OpenWeatherMap for the same city. Valkey is shared across all pods, so a cache hit by any pod benefits all. TTL 10min matches CloudFront's CDN TTL upstream.
 
 **Scaling — Scheduled pre-warm + KEDA, not HPA alone**
-HPA reacts to CPU/memory after load has already arrived — with a 2–5 minute lag for node provisioning and pod startup. Since the morning peak is predictable (daily, 7–9am), ASG Scheduled Actions warm nodes at 06:00 WIB and KEDA CronScaler scales pods to 12 at 06:30 WIB, 30 minutes before traffic hits. HPA and KEDA CPU trigger remain active as the reactive fallback for unexpected spikes.
+HPA reacts to CPU/memory after load has already arrived — with a 2–5 minute lag for node provisioning and pod startup. Since the morning peak is predictable (daily, 7–9am), ASG Scheduled Actions warm nodes at 06:00 UTC+7 and KEDA CronScaler scales pods to 12 at 06:30 UTC+7, 30 minutes before traffic hits. HPA and KEDA CPU trigger remain active as the reactive fallback for unexpected spikes.
 
 **IaC — Modular Terraform, environment-level variable extraction**
 Each AWS service is an independent module with no cross-module hardcoding. Staging and production differ only in `terraform.tfvars` — instance sizes, AZ count, replica counts, and all scheduling parameters are variables. This prevents configuration drift and allows the same module code to serve both environments.
@@ -120,7 +120,7 @@ MaxWeather/
 │   │   ├── kms/                         # KMS keys: aurora/elasticache/eks/s3
 │   │   ├── cloudwatch/                  # Log groups, alarms, dashboard, SNS
 │   │   ├── lambda-authorizer/           # Lambda function + DynamoDB API key store
-│   │   └── scheduled-scaling/           # 5 ASG Scheduled Actions (WIB timezone)
+│   │   └── scheduled-scaling/           # 5 ASG Scheduled Actions (UTC+7 timezone)
 │   ├── environments/
 │   │   ├── staging/                     # Staging: ap-southeast-1, 2 AZ
 │   │   │   ├── main.tf
@@ -215,7 +215,7 @@ MaxWeather/
 | `schedule_weekday_offpeak` | `{1,4,2}` | `{3,7,3}` | min/max/desired after weekday peak |
 | `schedule_weekend_peak` | `{2,4,2}` | `{4,8,4}` | min/max/desired during weekend warm |
 | `schedule_weekend_offpeak` | `{1,4,1}` | `{3,7,3}` | min/max/desired after weekend peak |
-| `schedule_night` | `{1,4,1}` | `{2,4,2}` | min/max/desired night mode (22:00 WIB) |
+| `schedule_night` | `{1,4,1}` | `{2,4,2}` | min/max/desired night mode (22:00 UTC+7) |
 
 ---
 
@@ -376,9 +376,9 @@ terraform destroy -var-file="terraform.tfvars"
 | Valkey | `cache.r7g.large` × 2 (AZ-a + AZ-b) | 1 shard, 1 replica — Multi-AZ, auto-failover |
 | NAT GW | 3 (1 per AZ) | Independent per AZ |
 
-### Scheduled Scaling — 5 Schedules (WIB = UTC+7)
+### Scheduled Scaling — 5 Schedules (UTC+7 = UTC+7)
 
-| Action | WIB Time | UTC Cron | Production Config |
+| Action | UTC+7 Time | UTC Cron | Production Config |
 |--------|----------|----------|-------------------|
 | Weekday pre-warm | 06:00 Mon-Fri | `0 23 * * 0-4` | min=6, max=10, desired=6 |
 | Weekday post-peak | 10:30 Mon-Fri | `30 3 * * 1-5` | min=3, max=7, desired=3 |
@@ -393,8 +393,8 @@ Nodes are pre-warmed **30 minutes before** KEDA CronScaler fires pods, allowing 
 | Trigger | Type | Config |
 |---------|------|--------|
 | CPU reactive | CPU utilization | threshold=70%, fires immediately on spike |
-| Weekday pre-warm | CronScaler | 06:30–09:30 WIB Mon-Fri, desiredReplicas=12 |
-| Weekend pre-warm | CronScaler | 07:30–10:30 WIB Sat-Sun, desiredReplicas=7 |
+| Weekday pre-warm | CronScaler | 06:30–09:30 UTC+7 Mon-Fri, desiredReplicas=12 |
+| Weekend pre-warm | CronScaler | 07:30–10:30 UTC+7 Sat-Sun, desiredReplicas=7 |
 
 After CronScaler window ends, `restoreToOriginalReplicaCount: true` hands control back to HPA (CPU-based), preventing sudden replica drops.
 
@@ -649,7 +649,7 @@ Cross-check between `design/architecture.md` and all source code. Performed 2026
 |----------|------------------|------------|-----------|--------|
 | KEDA `maxReplicaCount` | 20 | 10 | **20** | ✅ Fixed |
 | KEDA weekday `desiredReplicas` | 12 | 6 | **12** | ✅ Fixed |
-| KEDA weekday end time | 09:30 WIB | 10:00 WIB | **09:30 WIB** | ✅ Fixed |
+| KEDA weekday end time | 09:30 UTC+7 | 10:00 UTC+7 | **09:30 UTC+7** | ✅ Fixed |
 | KEDA weekend trigger | exists (07:30–10:30, 7 pods) | missing | **added** | ✅ Fixed |
 | HPA `maxReplicas` | 20 | 10 | **20** | ✅ Fixed |
 | Staging pod CPU request | 100m | 250m | **100m** | ✅ Fixed |

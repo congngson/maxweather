@@ -14,7 +14,7 @@ variable "schedule_weekday_peak" {
     max_size      = number
     desired_count = number
   })
-  description = "ASG config for weekday pre-warm (06:00 WIB Mon-Fri = 23:00 UTC Sun-Thu)"
+  description = "ASG config for weekday pre-warm (06:00 UTC+7 Mon-Fri = 23:00 UTC Sun-Thu)"
 }
 
 variable "schedule_weekday_offpeak" {
@@ -23,7 +23,7 @@ variable "schedule_weekday_offpeak" {
     max_size      = number
     desired_count = number
   })
-  description = "ASG config for weekday post-peak (10:30 WIB Mon-Fri = 03:30 UTC Mon-Fri)"
+  description = "ASG config for weekday post-peak (10:30 UTC+7 Mon-Fri = 03:30 UTC Mon-Fri)"
 }
 
 variable "schedule_weekend_peak" {
@@ -32,7 +32,7 @@ variable "schedule_weekend_peak" {
     max_size      = number
     desired_count = number
   })
-  description = "ASG config for weekend warm (07:30 WIB Sat-Sun = 00:30 UTC Sat-Sun)"
+  description = "ASG config for weekend warm (07:30 UTC+7 Sat-Sun = 00:30 UTC Sat-Sun)"
 }
 
 variable "schedule_weekend_offpeak" {
@@ -41,7 +41,7 @@ variable "schedule_weekend_offpeak" {
     max_size      = number
     desired_count = number
   })
-  description = "ASG config for weekend post-peak (10:30 WIB Sat-Sun = 03:30 UTC Sat-Sun)"
+  description = "ASG config for weekend post-peak (10:30 UTC+7 Sat-Sun = 03:30 UTC Sat-Sun)"
 }
 
 variable "schedule_night" {
@@ -50,5 +50,5 @@ variable "schedule_night" {
     max_size      = number
     desired_count = number
   })
-  description = "ASG config for night mode (22:00 WIB daily = 15:00 UTC daily)"
+  description = "ASG config for night mode (22:00 UTC+7 daily = 15:00 UTC daily)"
 }

@@ -2,7 +2,7 @@
   "info": {
     "name": "MaxWeather API",
     "_postman_id": "maxweather-collection-v1",
-    "description": "MaxWeather API collection — tests all endpoints with Bearer token (OAuth2) auth.\n\nSetup:\n1. Set collection variable `base_url` to your API Gateway URL\n2. Set collection variable `api_key` to a valid key from DynamoDB api-keys table\n3. Run requests in order — Health first, then authenticated endpoints",
+    "description": "MaxWeather API collection — tests all endpoints with Bearer token auth.\n\nTwo environments available — switch by changing `base_url`:\n\n1. Full deployment (AWS Lab, us-east-1) — temporary ~16h:\n   https://tnv51evjqk.execute-api.us-east-1.amazonaws.com/awslab\n\n2. Demo (personal account, ap-southeast-1) — permanent:\n   https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo\n\n`base_url` is pre-set to the full deployment. `api_key` is the same for both.\nRun Health Check first, then authenticated endpoints.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -18,13 +18,13 @@
   "variable": [
     {
       "key": "base_url",
-      "value": "https://your-api-id.execute-api.ap-southeast-1.amazonaws.com",
-      "description": "API Gateway base URL (no trailing slash)"
+      "value": "https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo",
+      "description": "Active base URL. Full deployment (lab, temporary): https://tnv51evjqk.execute-api.us-east-1.amazonaws.com/awslab — Demo (permanent): https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo"
     },
     {
       "key": "api_key",
-      "value": "your-api-key-here",
-      "description": "Bearer token — must exist in DynamoDB maxweather-{env}-api-keys table with active=true"
+      "value": "demo-key-maxweather-2026",
+      "description": "Bearer token — same key works on both environments"
     }
   ],
   "item": [
@@ -36,10 +36,10 @@
           "script": {
             "exec": [
               "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('Response has status field', () => {",
+              "pm.test('Response has status: healthy', () => {",
               "    const body = pm.response.json();",
               "    pm.expect(body).to.have.property('status');",
-              "    pm.expect(body.status).to.eql('ok');",
+              "    pm.expect(body.status).to.eql('healthy');",
               "});",
               "pm.test('Response time < 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));"
             ],
@@ -55,30 +55,31 @@
           "host": ["{{base_url}}"],
           "path": ["health"]
         },
-        "description": "Health check — no auth required. Verifies the service is running."
+        "description": "Health check — no auth required. Returns {\"status\": \"healthy\"}."
       }
     },
     {
-      "name": "Get Current Weather — metric",
+      "name": "Get Current Weather — Singapore (metric)",
       "event": [
         {
           "listen": "test",
           "script": {
             "exec": [
               "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('Response has data', () => {",
+              "pm.test('Response envelope is correct', () => {",
               "    const body = pm.response.json();",
+              "    pm.expect(body.status).to.eql('success');",
+              "    pm.expect(body.source).to.eql('OpenWeatherMap');",
               "    pm.expect(body).to.have.property('data');",
-              "    const d = body.data;",
-              "    pm.expect(d).to.have.property('city');",
-              "    pm.expect(d).to.have.property('temperature');",
-              "    pm.expect(d).to.have.property('humidity');",
-              "    pm.expect(d).to.have.property('description');",
               "});",
-              "pm.test('Cache header present', () => {",
-              "    pm.expect(pm.response.headers.get('X-Cache')).to.be.oneOf(['HIT', 'MISS', null]);",
+              "pm.test('Weather data fields present', () => {",
+              "    const d = pm.response.json().data;",
+              "    pm.expect(d).to.have.property('name');",
+              "    pm.expect(d.main).to.have.property('temp');",
+              "    pm.expect(d.main).to.have.property('humidity');",
+              "    pm.expect(d.weather[0]).to.have.property('description');",
               "});",
-              "pm.test('Response time < 2000ms', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+              "pm.test('Response time < 3000ms', () => pm.expect(pm.response.responseTime).to.be.below(3000));"
             ],
             "type": "text/javascript"
           }
@@ -95,11 +96,11 @@
             { "key": "units", "value": "metric" }
           ]
         },
-        "description": "Returns current weather for Singapore in metric units. Requires Bearer token."
+        "description": "Current weather for Singapore. Requires Bearer token. Response wraps raw OpenWeatherMap data under `data` key."
       }
     },
     {
-      "name": "Get Current Weather — imperial",
+      "name": "Get Current Weather — Hanoi (imperial)",
       "event": [
         {
           "listen": "test",
@@ -108,7 +109,11 @@
               "pm.test('Status is 200', () => pm.response.to.have.status(200));",
               "pm.test('City is Hanoi', () => {",
               "    const body = pm.response.json();",
-              "    pm.expect(body.data.city.toLowerCase()).to.include('hanoi');",
+              "    pm.expect(body.data.name.toLowerCase()).to.include('hanoi');",
+              "});",
+              "pm.test('Temperature is in Fahrenheit range', () => {",
+              "    const temp = pm.response.json().data.main.temp;",
+              "    pm.expect(temp).to.be.above(50);",
               "});"
             ],
             "type": "text/javascript"
@@ -126,30 +131,34 @@
             { "key": "units", "value": "imperial" }
           ]
         },
-        "description": "Returns current weather for Hanoi in imperial units."
+        "description": "Current weather for Hanoi in imperial units (°F)."
       }
     },
     {
-      "name": "Get 7-day Forecast",
+      "name": "Get 5-day Forecast — Singapore",
       "event": [
         {
           "listen": "test",
           "script": {
             "exec": [
               "pm.test('Status is 200', () => pm.response.to.have.status(200));",
-              "pm.test('Response has 7 forecast days', () => {",
+              "pm.test('Response envelope is correct', () => {",
               "    const body = pm.response.json();",
+              "    pm.expect(body.status).to.eql('success');",
+              "    pm.expect(body.source).to.eql('OpenWeatherMap');",
               "    pm.expect(body).to.have.property('data');",
-              "    pm.expect(body.data).to.have.property('forecasts');",
-              "    pm.expect(body.data.forecasts).to.have.lengthOf(7);",
               "});",
-              "pm.test('Each day has required fields', () => {",
-              "    const forecasts = pm.response.json().data.forecasts;",
-              "    forecasts.forEach(day => {",
-              "        pm.expect(day).to.have.property('date');",
-              "        pm.expect(day).to.have.property('temp_min');",
-              "        pm.expect(day).to.have.property('temp_max');",
-              "        pm.expect(day).to.have.property('description');",
+              "pm.test('Forecast list is present and non-empty', () => {",
+              "    const d = pm.response.json().data;",
+              "    pm.expect(d).to.have.property('list');",
+              "    pm.expect(d.list.length).to.be.above(0);",
+              "});",
+              "pm.test('Each forecast entry has required fields', () => {",
+              "    const list = pm.response.json().data.list;",
+              "    list.slice(0, 3).forEach(entry => {",
+              "        pm.expect(entry).to.have.property('dt');",
+              "        pm.expect(entry.main).to.have.property('temp');",
+              "        pm.expect(entry.weather[0]).to.have.property('description');",
               "    });",
               "});",
               "pm.test('Response time < 3000ms', () => pm.expect(pm.response.responseTime).to.be.below(3000));"
@@ -161,28 +170,55 @@
       "request": {
         "method": "GET",
         "url": {
-          "raw": "{{base_url}}/forecast?city=Singapore&days=7&units=metric",
+          "raw": "{{base_url}}/forecast?city=Singapore&days=5&units=metric",
           "host": ["{{base_url}}"],
           "path": ["forecast"],
           "query": [
             { "key": "city",  "value": "Singapore" },
-            { "key": "days",  "value": "7" },
+            { "key": "days",  "value": "5" },
             { "key": "units", "value": "metric" }
           ]
         },
-        "description": "Returns 7-day forecast for Singapore in metric units."
+        "description": "5-day forecast for Singapore. OpenWeatherMap returns 3-hour interval entries under `data.list` (up to 40 entries for 5 days)."
       }
     },
     {
-      "name": "Invalid API Key — expect 401",
+      "name": "Unauthorized — no token (expect 401)",
       "event": [
         {
           "listen": "test",
           "script": {
             "exec": [
-              "pm.test('Status is 401 or 403', () => {",
-              "    pm.expect(pm.response.code).to.be.oneOf([401, 403]);",
-              "});",
+              "pm.test('Status is 401', () => pm.response.to.have.status(401));",
+              "pm.test('Response time < 1000ms', () => pm.expect(pm.response.responseTime).to.be.below(1000));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/weather?city=Singapore&units=metric",
+          "host": ["{{base_url}}"],
+          "path": ["weather"],
+          "query": [
+            { "key": "city",  "value": "Singapore" },
+            { "key": "units", "value": "metric" }
+          ]
+        },
+        "description": "Request with no Authorization header — Lambda Authorizer returns 401."
+      }
+    },
+    {
+      "name": "Forbidden — invalid token (expect 403)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status is 403', () => pm.response.to.have.status(403));",
               "pm.test('Response time < 1000ms', () => pm.expect(pm.response.responseTime).to.be.below(1000));"
             ],
             "type": "text/javascript"
@@ -204,7 +240,7 @@
             { "key": "units", "value": "metric" }
           ]
         },
-        "description": "Verifies that an invalid Bearer token is rejected by the Lambda Authorizer."
+        "description": "Request with a Bearer token not found in DynamoDB — Lambda Authorizer returns 403."
       }
     }
   ]

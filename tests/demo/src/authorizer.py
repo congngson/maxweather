@@ -3,7 +3,7 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
-_ddb = boto3.resource("dynamodb", region_name=os.environ["AWS_REGION"])
+_ddb = boto3.resource("dynamodb")
 _table = _ddb.Table(os.environ["API_KEYS_TABLE"])
 
 

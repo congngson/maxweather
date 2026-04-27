@@ -6,6 +6,7 @@
 - [Design Overview](#design-overview)
 - [Folder Structure](#folder-structure)
 - [Prerequisites](#prerequisites)
+- [Deployment Guide](#deployment-guide)
 - [Environment Variables](#environment-variables)
 - [Coding Standards](#coding-standards)
 - [Component 1 — Application (weather-service)](#component-1--application-weather-service)
@@ -13,9 +14,9 @@
 - [Component 3 — Kubernetes Manifests](#component-3--kubernetes-manifests)
 - [Component 4 — Jenkins Pipeline](#component-4--jenkins-pipeline)
 - [Component 5 — API Gateway](#component-5--api-gateway)
-- [Component 6 — Postman Collection](#component-6--postman-collection)
+- [Component 6 — Postman Collection & Live Demo](#component-6--postman-collection--live-demo)
 - [Real AWS Test Results](#real-aws-test-results)
-- [Architecture Compliance Audit](#architecture-compliance-audit)
+
 
 ---
 
@@ -36,7 +37,7 @@ Weather data is fetched from a third-party API (OpenWeatherMap) on every request
 ### Key Design Decisions
 
 **Auth — Lambda Authorizer over API Key native validation**
-API Gateway's native API key mechanism offers no per-key revocation granularity and no audit trail. The Lambda Authorizer reads from DynamoDB on each request, enabling real-time key status checks (`active` flag), per-key access control, and a full CloudTrail audit trail. Latency overhead is absorbed by API Gateway's authorizer cache (TTL 600s).
+API Gateway's native API key mechanism offers no per-key revocation granularity and no audit trail. The Lambda Authorizer reads from DynamoDB on each request, enabling real-time key status checks (`active` flag), per-key access control, and a full CloudTrail audit trail. Latency overhead is absorbed by API Gateway's authorizer cache (TTL 300s).
 
 **Cache — ElastiCache Valkey over in-process cache**
 In-process cache (e.g. Python dict) would not survive pod restarts and would be duplicated across all pod replicas — each replica would independently call OpenWeatherMap for the same city. Valkey is shared across all pods, so a cache hit by any pod benefits all. TTL 10min matches CloudFront's CDN TTL upstream.
@@ -64,6 +65,24 @@ User → Route 53 → CloudFront (TTL 10min)
                                                         │
                                                write to Valkey (TTL 10min)
 ```
+
+### CI/CD Flow
+
+```
+git push
+    ↓
+Test → Build & Push to ECR (staging)
+    ↓
+Deploy Staging → Smoke Test        ← fail = stop, production never touched
+    ↓
+Manual Approval (ops-team, 30min)  ← human gate before any production change
+    ↓
+Promote Image → ECR (production)
+    ↓
+Deploy Production → Health Check
+```
+
+Same image tag flows from staging to production — no rebuild, no substitution. Staging smoke test failure blocks production entirely.
 
 ### Environment Summary
 
@@ -146,10 +165,22 @@ MaxWeather/
 │       └── values.yaml                  # Helm values for Nginx Ingress Controller
 │
 ├── jenkins/
-│   └── Jenkinsfile                      # Pipeline: Build→Test→Push→Deploy→Approve→Prod
+│   └── Jenkinsfile                      # Single pipeline: Test→Build→Staging→Approve→Production
 │
 ├── postman/
 │   └── MaxWeather.postman_collection.json
+│
+├── tests/
+│   ├── real-aws/                        # Terraform test against real AWS (Lab account)
+│   │   ├── main.tf                      # Full stack: VPC, EKS, Aurora, Valkey, Lambda, API GW
+│   │   └── src/
+│   │       └── weather.py               # Weather Lambda — proxies to OpenWeatherMap
+│   └── demo/                            # Minimal free-tier demo (personal account, ap-southeast-1)
+│       ├── main.tf                      # DynamoDB + Authorizer Lambda + Weather Lambda + API GW
+│       ├── variables.tf
+│       └── src/
+│           ├── authorizer.py            # Lambda Authorizer
+│           └── weather.py               # Weather Lambda
 │
 └── README.md
 ```
@@ -168,6 +199,123 @@ MaxWeather/
 | AWS CLI | 2.x | AWS authentication |
 | kustomize | 5.x | K8s overlay management |
 | KEDA | 2.x | Event-driven autoscaler |
+
+---
+
+## Deployment Guide
+
+Complete first-time deployment sequence. Subsequent deployments are handled by Jenkins automatically.
+
+### Step 1 — Bootstrap Terraform Backend (one-time)
+
+Create S3 bucket and DynamoDB lock table before the first `terraform init`:
+
+```bash
+aws s3 mb s3://maxweather-tfstate-<account-id> --region ap-southeast-1
+aws s3api put-bucket-versioning \
+  --bucket maxweather-tfstate-<account-id> \
+  --versioning-configuration Status=Enabled
+
+aws dynamodb create-table \
+  --table-name maxweather-tfstate-lock \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region ap-southeast-1
+```
+
+### Step 2 — Deploy Infrastructure
+
+```bash
+ENV=staging   # or production
+cd terraform/environments/${ENV}
+terraform init
+terraform apply -var-file="terraform.tfvars"
+```
+
+Modules deploy in dependency order automatically: `kms → iam → vpc → ecr → aurora → elasticache → eks → cloudwatch → lambda-authorizer → scheduled-scaling`.
+
+### Step 3 — Populate Secrets Manager
+
+```bash
+REGION=ap-southeast-1
+
+aws secretsmanager create-secret \
+  --name "maxweather/${ENV}/openweathermap-api-key" \
+  --secret-string "YOUR_OWM_API_KEY" \
+  --region $REGION
+
+aws secretsmanager create-secret \
+  --name "maxweather/${ENV}/db-password" \
+  --secret-string "YOUR_DB_PASSWORD" \
+  --region $REGION
+```
+
+### Step 4 — Seed API Keys (DynamoDB)
+
+```bash
+aws dynamodb put-item \
+  --table-name "maxweather-${ENV}-api-keys" \
+  --item '{
+    "api_key": {"S": "your-bearer-token"},
+    "active":  {"BOOL": true},
+    "client":  {"S": "client-name"}
+  }' \
+  --region $REGION
+```
+
+### Step 5 — Configure kubectl
+
+```bash
+aws eks update-kubeconfig \
+  --region $REGION \
+  --name "maxweather-${ENV}"
+```
+
+### Step 6 — Install Cluster Add-ons (first time only)
+
+```bash
+# KEDA
+helm repo add kedacore https://kedacore.github.io/charts
+helm upgrade --install keda kedacore/keda \
+  --namespace keda --create-namespace
+
+# Nginx Ingress Controller
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  -f k8s/nginx-ingress/values.yaml \
+  --namespace ingress-nginx --create-namespace
+```
+
+### Step 7 — Build and Push Docker Image
+
+```bash
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+ECR="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+IMAGE="${ECR}/maxweather-${ENV}/weather-service"
+TAG=$(git rev-parse --short HEAD)
+
+aws ecr get-login-password --region $REGION | \
+  docker login --username AWS --password-stdin $ECR
+
+docker build -t ${IMAGE}:${TAG} app/
+docker push ${IMAGE}:${TAG}
+```
+
+### Step 8 — Deploy to Kubernetes
+
+```bash
+kubectl apply -k k8s/overlays/${ENV}/
+kubectl rollout status deployment/weather-service -n maxweather
+```
+
+### Step 9 — Configure API Gateway
+
+See [Component 5 — API Gateway](#component-5--api-gateway).
+
+### Step 10 — Set Up Jenkins
+
+See [Component 4 — Jenkins Pipeline](#component-4--jenkins-pipeline). Jenkins handles all future deployments via the automated pipeline.
 
 ---
 
@@ -376,7 +524,7 @@ terraform destroy -var-file="terraform.tfvars"
 | Valkey | `cache.r7g.large` × 2 (AZ-a + AZ-b) | 1 shard, 1 replica — Multi-AZ, auto-failover |
 | NAT GW | 3 (1 per AZ) | Independent per AZ |
 
-### Scheduled Scaling — 5 Schedules (UTC+7 = UTC+7)
+### Scheduled Scaling — 5 Schedules (UTC+7)
 
 | Action | UTC+7 Time | UTC Cron | Production Config |
 |--------|----------|----------|-------------------|
@@ -415,6 +563,24 @@ Without Statement 2, `aws_cloudwatch_log_group` with `kms_key_id` returns `Acces
 
 ## Component 3 — Kubernetes Manifests
 
+### Install Cluster Add-ons (first time only)
+
+```bash
+# KEDA — event-driven autoscaler (required for CronScaler + HTTP triggers)
+helm repo add kedacore https://kedacore.github.io/charts
+helm upgrade --install keda kedacore/keda \
+  --namespace keda --create-namespace
+
+# Verify
+kubectl get pods -n keda
+
+# Nginx Ingress Controller
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  -f k8s/nginx-ingress/values.yaml \
+  --namespace ingress-nginx --create-namespace
+```
+
 ### Apply to Cluster
 
 ```bash
@@ -422,12 +588,6 @@ Without Statement 2, `aws_cloudwatch_log_group` with `kms_key_id` returns `Acces
 aws eks update-kubeconfig \
   --region ap-southeast-1 \
   --name maxweather-<env>
-
-# Install Nginx Ingress Controller (first time only)
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-  -f k8s/nginx-ingress/values.yaml \
-  --namespace ingress-nginx --create-namespace
 
 # Apply staging
 kubectl apply -k k8s/overlays/staging/
@@ -461,35 +621,76 @@ kubectl label node maxweather-test-worker2 topology.kubernetes.io/zone=ap-southe
 
 ## Component 4 — Jenkins Pipeline
 
-### Pipeline Stages
+### Pipeline Flow
+
+Single pipeline run — staging and production are **not** separate triggers. The same image that passes staging smoke test is promoted to production, guaranteeing no substitution between environments.
 
 ```
-Checkout SCM
+Checkout
     ↓
-Lint & Unit Tests
+Test (unit tests)              ← fail = pipeline stops, no image built
     ↓
-Build Docker Image (tagged with Git commit SHA)
+Build & Push → ECR (staging)   ← tagged: branch-sha-build#
     ↓
-Push to ECR
+Deploy → Staging
     ↓
-Deploy to Staging
+Smoke Test (staging)           ← fail = pipeline stops, production never touched
     ↓
-Smoke Test (staging)     ← fail here = block production
+Manual Approval Gate           ← ops-team approves, 30min timeout
     ↓
-Manual Approval Gate     ← pipeline pauses for human review
+Promote Image → ECR (production)  ← re-tag same image, no rebuild
     ↓
-Deploy to Production
+Deploy → Production            ← rolling update: maxUnavailable=0, maxSurge=1
     ↓
 Health Check (production)
 ```
 
 ### Key Behaviors
 
-- Failed unit tests abort pipeline before Docker build (fast fail)
-- Image tagged with `${GIT_COMMIT_SHA}` — never `latest`
-- Staging smoke test hits `/health` endpoint — any non-200 blocks production
-- Production deploy uses rolling update (`maxUnavailable: 0`, `maxSurge: 1`)
-- Jenkins uses IRSA (IAM role for service accounts) to push to ECR — no static credentials
+- Unit tests run before Docker build — fast fail saves build time
+- Image tag: `{branch}-{git-sha}-{build#}` — unique, traceable, never `latest`
+- Staging smoke test verifies `/health` (200) and `/weather` with Bearer token (200)
+- **Promote Image stage**: re-tags the staging-tested image into the production ECR repo — same binary, no rebuild, no substitution risk
+- Production rolling update: `maxUnavailable: 0`, `maxSurge: 1` — zero downtime, one pod at a time
+- Failure at any stage triggers `kubectl rollout undo` on both environments
+- Jenkins uses EC2 instance profile — no static AWS credentials stored
+
+### Jenkins EC2 Setup (one-time)
+
+Jenkins runs on a `t3.large` EC2 in the same VPC. SSH in and run:
+
+```bash
+# 1. Install Java + Jenkins
+sudo apt update && sudo apt install -y openjdk-17-jdk
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+  | sudo tee /usr/share/keyrings/jenkins-keyring.asc > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
+  https://pkg.jenkins.io/debian-stable binary/" \
+  | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+sudo apt update && sudo apt install -y jenkins docker.io
+sudo usermod -aG docker jenkins
+sudo systemctl enable --now jenkins
+
+# 2. Install kubectl and AWS CLI
+# https://kubernetes.io/docs/tasks/tools/
+# https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html
+
+# 3. Configure kubeconfig (on the Jenkins EC2)
+aws eks update-kubeconfig --region ap-southeast-1 --name maxweather-staging
+aws eks update-kubeconfig --region ap-southeast-1 --name maxweather-production
+```
+
+**IAM permissions** — attach an instance profile to the EC2 with:
+- `ecr:GetAuthorizationToken`, `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`
+- `eks:DescribeCluster`
+- `sts:AssumeRole`
+
+No static credentials stored — AWS SDK picks up the instance profile automatically.
+
+**Required Jenkins plugins** (Manage Jenkins → Plugins → Available):
+`Pipeline`, `Git`, `Amazon ECR`, `AWS Steps`, `Kubernetes CLI`
+
+**Create pipeline job**: New Item → Pipeline → Pipeline script from SCM → Git → Script path: `jenkins/Jenkinsfile`
 
 ---
 
@@ -497,12 +698,12 @@ Health Check (production)
 
 ### Setup (AWS Console)
 
-1. Create **HTTP API** (not REST API)
-2. Integration: HTTP proxy → ALB DNS
-3. Routes: `ANY /{proxy+}` → proxy to ALB
-4. Attach **Lambda Authorizer** to all routes except `/health`
-5. Enable **caching** — TTL 600s, cache key: `city` + `Authorization`
-6. Set **throttling** — 1000 req/s (production), 100 req/s (staging)
+1. Create **REST API** (not HTTP API — Lambda REQUEST authorizer requires REST API v1)
+2. Integration: AWS_PROXY → Lambda (weather function)
+3. Resources: `GET /health` (no auth) + `ANY /{proxy+}` (CUSTOM authorizer)
+4. Attach **Lambda Authorizer** (REQUEST type) to `/{proxy+}` — cache TTL 300s
+5. Set **throttling** — 1000 req/s (production), 100 req/s (staging)
+6. Deploy to a named stage (`staging` / `production`)
 
 ### Lambda Authorizer Flow
 
@@ -515,36 +716,109 @@ API Gateway → Lambda → DynamoDB (GetItem by api_key)
 
 The authorizer reads `Authorization: Bearer <token>` from the HTTP header and looks up the key in the `maxweather-{env}-api-keys` DynamoDB table. Token is matched against the `api_key` partition key, and `active` boolean attribute is checked.
 
+### API Key Management (DynamoDB)
+
+```bash
+# Add a new key
+aws dynamodb put-item \
+  --table-name maxweather-staging-api-keys \
+  --item '{"api_key": {"S": "new-token"}, "active": {"BOOL": true}, "client": {"S": "client-name"}}'
+
+# Revoke a key (set active=false — takes effect within authorizer cache TTL: 300s)
+aws dynamodb update-item \
+  --table-name maxweather-staging-api-keys \
+  --key '{"api_key": {"S": "token-to-revoke"}}' \
+  --update-expression "SET active = :v" \
+  --expression-attribute-values '{":v": {"BOOL": false}}'
+
+# List all keys
+aws dynamodb scan --table-name maxweather-staging-api-keys \
+  --projection-expression "api_key, active, client"
+```
+
 ---
 
-## Component 6 — Postman Collection
+## Component 6 — Postman Collection & Live Demo
 
-### Requests
+### Live Demo Endpoint
 
-| # | Name | Method | Path | Auth |
-|---|------|--------|------|------|
-| 1 | Get Access Token | `POST` | `/auth/token` | None |
-| 2 | Get Current Weather | `GET` | `/weather?city=Hanoi&units=metric` | Bearer token |
-| 3 | Get 5-day Forecast | `GET` | `/forecast?city=HoChiMinh&days=5&units=metric` | Bearer token |
-| 4 | Health Check | `GET` | `/health` | None |
-| 5 | Unauthorized Request | `GET` | `/weather?city=Hanoi` | No token (expect 401) |
+| Field | Value |
+|-------|-------|
+| Base URL | `https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo` |
+| API Key | `demo-key-maxweather-2026` |
+| Region | ap-southeast-1 (Singapore) — permanent, free-tier |
+| Stack | Lambda + DynamoDB + API Gateway REST (`tests/demo/`) |
 
-### Variables (no hardcoded URLs or tokens)
+```bash
+# Health check — no auth required
+curl https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo/health
 
+# Current weather
+curl -H "Authorization: Bearer demo-key-maxweather-2026" \
+  "https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo/weather?city=Singapore"
+
+# Forecast
+curl -H "Authorization: Bearer demo-key-maxweather-2026" \
+  "https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo/forecast?city=Hanoi&days=3"
+
+# No token — expect 401
+curl "https://7zyfi66dtj.execute-api.ap-southeast-1.amazonaws.com/demo/weather?city=Singapore"
 ```
-base_url      = https://api.maxweather.com
-client_id     = {{client_id}}
-client_secret = {{client_secret}}
-access_token  = (auto-set by Get Access Token request)
-```
+
+### Postman Collection
+
+Collection file: `postman/MaxWeather.postman_collection.json`
+
+Import into Postman — `base_url` and `api_key` are pre-filled to the live demo endpoint above. No manual setup required.
+
+| # | Name | Method | Path | Auth | Expected |
+|---|------|--------|------|------|----------|
+| 1 | Health Check | `GET` | `/health` | None | `200 {"status":"healthy"}` |
+| 2 | Get Current Weather — Singapore (metric) | `GET` | `/weather?city=Singapore&units=metric` | Bearer | `200` + OWM data |
+| 3 | Get Current Weather — Hanoi (imperial) | `GET` | `/weather?city=Hanoi&units=imperial` | Bearer | `200` + OWM data |
+| 4 | Get 5-day Forecast — Singapore | `GET` | `/forecast?city=Singapore&days=5&units=metric` | Bearer | `200` + forecast list |
+| 5 | Unauthorized — no token | `GET` | `/weather?city=Singapore` | None | `401` |
+| 6 | Forbidden — invalid token | `GET` | `/weather?city=Singapore` | Bearer (wrong) | `403` |
+
+Each request includes automated test scripts verifying status codes, response envelope (`status`, `source`, `data`), and OWM data fields.
 
 ---
 
 ## Real AWS Test Results
 
-All tests run against AWS Lab account `961341524524` (us-east-1, temporary 72h credentials). Resources destroyed after each test session.
+### API Endpoint Verification — 2026-04-27
 
-### Test Session — 2026-04-25
+End-to-end tests against the demo stack (`tests/demo/`, account `618788620436`, ap-southeast-1).
+
+| Test | Command | Expected | Result |
+|------|---------|----------|--------|
+| Health (no auth) | `GET /health` | `200 {"status":"healthy"}` | ✅ Pass |
+| Weather with valid token | `GET /weather?city=Singapore` + Bearer | `200` + OWM data | ✅ Pass |
+| Forecast with valid token | `GET /forecast?city=Hanoi&days=3` + Bearer | `200` + OWM data | ✅ Pass |
+| No token | `GET /weather?city=Singapore` (no header) | `401 Unauthorized` | ✅ Pass |
+| Wrong token | `GET /weather?city=Singapore` + wrong Bearer | `403 Forbidden` | ✅ Pass |
+
+Sample response — `/weather?city=Singapore`:
+```json
+{
+  "status": "success",
+  "cached": false,
+  "source": "OpenWeatherMap",
+  "data": {
+    "name": "Singapore",
+    "main": { "temp": 29.5, "feels_like": 33.1, "humidity": 78 },
+    "weather": [{ "description": "few clouds" }],
+    "wind": { "speed": 3.2 },
+    "cod": 200
+  }
+}
+```
+
+---
+
+### Terraform Module Tests — 2026-04-25
+
+All tests run against AWS Lab account `961341524524` (us-east-1, temporary 72h credentials). Resources destroyed after each test session.
 
 #### terraform apply
 
@@ -624,61 +898,3 @@ Destroy complete! Resources: 44 destroyed.
 
 All resources cleaned up successfully.
 
----
-
-## Architecture Compliance Audit
-
-Cross-check between `design/architecture.md` and all source code. Performed 2026-04-25.
-
-### Terraform — Parameter Compliance
-
-| Parameter | Architecture Spec | Before Fix | After Fix | Status |
-|-----------|------------------|------------|-----------|--------|
-| `kubernetes_version` (staging) | 1.34 | 1.31 | **1.34** | ✅ Fixed |
-| `kubernetes_version` (production) | 1.34 | 1.31 | **1.34** | ✅ Fixed |
-| Production `az_count` | 3 (3 NAT GWs) | 2 | **3** | ✅ Fixed |
-| Staging Aurora instance | `db.t4g.medium` | `db.r7g.large` | **`db.t4g.medium`** | ✅ Fixed |
-| Staging Valkey node type | `cache.t4g.medium` | `cache.r7g.large` | **`cache.t4g.medium`** | ✅ Fixed |
-| Production EKS burst type | `m7i.large` | `m7i.xlarge` | **`m7i.large`** | ✅ Fixed |
-| Production EKS burst max | 7 ("0–7 nodes") | 6 | **7** | ✅ Fixed |
-| Scheduled scaling schedules | 5 schedules | 2 schedules | **5 schedules** | ✅ Fixed |
-
-### Kubernetes — Resource Sizing Compliance
-
-| Resource | Architecture Spec | Before Fix | After Fix | Status |
-|----------|------------------|------------|-----------|--------|
-| KEDA `maxReplicaCount` | 20 | 10 | **20** | ✅ Fixed |
-| KEDA weekday `desiredReplicas` | 12 | 6 | **12** | ✅ Fixed |
-| KEDA weekday end time | 09:30 UTC+7 | 10:00 UTC+7 | **09:30 UTC+7** | ✅ Fixed |
-| KEDA weekend trigger | exists (07:30–10:30, 7 pods) | missing | **added** | ✅ Fixed |
-| HPA `maxReplicas` | 20 | 10 | **20** | ✅ Fixed |
-| Staging pod CPU request | 100m | 250m | **100m** | ✅ Fixed |
-| Staging pod RAM request | 128Mi | 256Mi | **128Mi** | ✅ Fixed |
-| Production pod CPU request | 200m | 500m | **200m** | ✅ Fixed |
-| Production HPA `maxReplicas` | 20 | 10 | **20** | ✅ Fixed |
-
-### Components Not Fully Tested (require full EKS cluster)
-
-| Component | Reason Not Tested | How to Verify |
-|-----------|-------------------|---------------|
-| IAM — IRSA | Requires live EKS OIDC provider | `kubectl exec` → `aws sts get-caller-identity` |
-| Aurora | ~10min provisioning, high cost | Apply to staging, connect from private subnet |
-| ElastiCache Valkey | Requires VPC private subnet | `redis-cli -h <endpoint> -p 6379` from pod |
-| EKS node groups | ~15min provisioning | `kubectl get nodes` |
-| KEDA ScaledObject | Requires EKS + KEDA installed | `kubectl get scaledobject` |
-| Scheduled scaling | Requires ASG from EKS | Check ASG scheduled actions in AWS Console |
-| Jenkins pipeline | Requires Jenkins EC2 | Run pipeline, verify each stage |
-
-### Bugs Found and Fixed (all sessions)
-
-| # | Bug | Discovered By | Fix |
-|---|-----|---------------|-----|
-| 1 | Aurora `monitoring_role_arn` used empty string default | Code review | Changed to internal `aws_iam_role.enhanced_monitoring.arn` |
-| 2 | CloudWatch dashboard HCL used `;` as attribute separator | `terraform validate` | Split each attribute to its own line |
-| 3 | Duplicate log group `/lambda/authorizer` created by both cloudwatch and lambda-authorizer modules | Code review | Removed `lambda_auth` from cloudwatch module |
-| 4 | Dockerfile: `pip install --user` installs to `/root/.local` (inaccessible to non-root) | kind test | Switched to Python venv at `/opt/venv` |
-| 5 | topologySpreadConstraints pods Pending in kind | kind test | Label kind worker nodes with `topology.kubernetes.io/zone` |
-| 6 | CloudWatch dashboard widgets missing `region` field | Real AWS test | Added `region = var.aws_region` to all 4 widget blocks |
-| 7 | KMS key policy missing CloudWatch Logs principal | Real AWS test | Added `AllowCloudWatchLogs` statement with service principal |
-| 8 | Lambda env var `AWS_REGION` is reserved by Lambda runtime | Real AWS test | Removed from environment block; Lambda injects it automatically |
-| 9 | Lambda role missing `dynamodb:GetItem` and KMS permissions | Real AWS test | Added inline policy to test role |

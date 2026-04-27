@@ -20,10 +20,11 @@ htmlcov/
 *.tfstate.backup
 *.tfplan
 tfplan
+tests/demo/terraform.tfvars
 .terraform.lock.hcl
 
 # ── Lambda build artifacts ────────────────────────────────────────────────────
-terraform/modules/lambda-authorizer/.build/
+**/.build/
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .idea/
